@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WME MP Links
 // @namespace    https://github.com/
-// @version      1.0.2.beta1
+// @version      1.0.2
 // @description  Creates clickable links for any web URLs found on MPs.
 // @author       Thynamelessone
 // @match        https://www.waze.com/*editor*
