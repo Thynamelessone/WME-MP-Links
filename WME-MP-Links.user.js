@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WME MP Links
 // @namespace    https://github.com/
-// @version      1.0.1
+// @version      1.0.2
 // @description  Creates clickable links for any web URLs found on MPs.
 // @author       Thynamelessone
 // @match        https://www.waze.com/*editor*
@@ -19,20 +19,15 @@
 
     const SCRIPT_ID = "WME-MP-Links";
     const SCRIPT_NAME = "WME MP Links";
-    const updateMessage = "";
+    const updateMessage = "Fixed bug where script failed to load following refresh";
 
-    if (typeof WazeWrap !== 'undefined' && WazeWrap.Interface) {
-        WazeWrap.Interface.ShowScriptUpdate(SCRIPT_NAME, GM_info.script.version, updateMessage);
-    }
-
-    // Matches any valid http, https, or www link
     const URL_REGEX_TEST = /(?:https?:\/\/|www\.)[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?:\/[^\s<"'`;,]*)?/i;
     const URL_REGEX_MATCH = /(?:https?:\/\/|www\.)[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?:\/[^\s<"'`;,]*)?/gi;
-
     const TAB_TARGET_NAME = 'wme_shared_external_tab';
 
     let sharedWindowRef = null;
-    let sdk = null;
+    let scanTimeout = null;
+    const observedRoots = new WeakSet();
 
     function openInSharedTab(url) {
         const targetUrl = url.startsWith('www.') ? `https://${url}` : url;
@@ -92,16 +87,29 @@
         parent.replaceChild(fragment, node);
     }
 
-    function processContainer(selector) {
-        const containers = document.querySelectorAll(selector);
-        containers.forEach(container => {
-            const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null, false);
-            const nodes = [];
-            while (walker.nextNode()) {
-                nodes.push(walker.currentNode);
+    // Recursively scans standard DOM and Shadow DOM roots
+    function walkAndLinkify(root) {
+        if (!root) return;
+        observeRoot(root);
+
+        const walker = document.createTreeWalker(
+            root,
+            NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT,
+            null,
+            false
+        );
+
+        const textNodes = [];
+        let currentNode;
+        while ((currentNode = walker.nextNode())) {
+            if (currentNode.nodeType === Node.TEXT_NODE) {
+                textNodes.push(currentNode);
+            } else if (currentNode.shadowRoot) {
+                walkAndLinkify(currentNode.shadowRoot);
             }
-            nodes.forEach(linkifyNode);
-        });
+        }
+
+        textNodes.forEach(linkifyNode);
     }
 
     function scanForLinks() {
@@ -116,51 +124,58 @@
             'div[class*="panel"]'
         ];
 
-        selectors.forEach(processContainer);
+        selectors.forEach(selector => {
+            document.querySelectorAll(selector).forEach(walkAndLinkify);
+        });
     }
 
-    function watchDOM() {
+    function scheduleScan() {
+        if (scanTimeout) clearTimeout(scanTimeout);
+        scanTimeout = setTimeout(scanForLinks, 150);
+    }
+
+    function observeRoot(root) {
+        if (observedRoots.has(root)) return;
+        observedRoots.add(root);
+
         const observer = new MutationObserver((mutations) => {
-            let shouldScan = false;
             for (const mutation of mutations) {
-                if (mutation.addedNodes.length > 0) {
-                    shouldScan = true;
+                if (mutation.addedNodes.length > 0 || mutation.type === 'characterData') {
+                    scheduleScan();
                     break;
                 }
             }
-            if (shouldScan) {
-                scanForLinks();
-            }
         });
 
-        const targetNode = document.getElementById('app-container') || document.body;
-        observer.observe(targetNode, { childList: true, subtree: true });
-        scanForLinks();
+        observer.observe(root, {
+            childList: true,
+            subtree: true,
+            characterData: true
+        });
     }
 
     async function initialise() {
         try {
             console.log(`[${SCRIPT_NAME}] Initialising...`);
 
-            if (typeof getWmeSdk !== "function") throw new Error("WME SDK is unavailable.");
+            if (typeof getWmeSdk !== "function") {
+                throw new Error("WME SDK is unavailable.");
+            }
 
             const wmeSdk = getWmeSdk({ scriptId: SCRIPT_ID, scriptName: SCRIPT_NAME });
 
-            await wmeSdk.Events.once({ eventName: "wme-ready" });
-            sdk = wmeSdk;
-
-            if (typeof initWmeSdkPlus === "function") {
-                try {
-                    const sdkPlus = await initWmeSdkPlus(wmeSdk, {
-                        hooks: ["DataModel.MapProblems", "DataModel.VenueUpdateRequests", "DataModel.MapSuggestions"]
-                    });
-                    if (sdkPlus) sdk = sdkPlus;
-                } catch (e) {
-                    console.warn(`[${SCRIPT_NAME}] wme-sdk-plus init skipped:`, e);
-                }
+            // Fix: Only wait for wme-ready if WME isn't already ready
+            if (!wmeSdk.State.isReady()) {
+                await wmeSdk.Events.once({ eventName: "wme-ready" });
             }
 
-            watchDOM();
+            if (typeof WazeWrap !== 'undefined' && WazeWrap.Interface) {
+                WazeWrap.Interface.ShowScriptUpdate(SCRIPT_NAME, GM_info.script.version, updateMessage);
+            }
+
+            const targetNode = document.getElementById('app-container') || document.body;
+            observeRoot(targetNode);
+            scanForLinks();
 
             console.log(`[${SCRIPT_NAME}] Initialisation complete.`);
         } catch (error) {
